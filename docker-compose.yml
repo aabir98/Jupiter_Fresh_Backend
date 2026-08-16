@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  backend:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_PATH=/data/taja_cart.db
+      - UPLOAD_DIR=/data/uploads
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
