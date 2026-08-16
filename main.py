@@ -11,6 +11,33 @@ import shutil
 import firebase_admin
 from firebase_admin import credentials, messaging
 
+
+def get_dp_with_true_rating(cursor, dp_id):
+    cursor.execute("SELECT * FROM delivery_personnel WHERE id = ?", (dp_id,))
+    dp_row = cursor.fetchone()
+    if not dp_row:
+        return None
+    
+    dp = dict(dp_row)
+    
+    cursor.execute("SELECT delivery_partner_rating FROM orders WHERE delivery_partner_id = ? AND status = 'Delivered'", (dp_id,))
+    orders = cursor.fetchall()
+    
+    if not orders:
+        dp['rating'] = 0.0
+        dp['total_ratings'] = 0
+    else:
+        total = 0
+        for o in orders:
+            if o['delivery_partner_rating'] is not None:
+                total += o['delivery_partner_rating']
+            else:
+                total += 2.5
+        dp['rating'] = total / len(orders)
+        dp['total_ratings'] = len(orders)
+        
+    return dp
+
 app = FastAPI()
 
 # Initialize Firebase Admin SDK
@@ -136,9 +163,51 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
     status = "Placed"
 
     cursor = db.cursor()
+    import math
+
+    def haversine(lat1, lon1, lat2, lon2):
+        if lat1 is None or lon1 is None or lat2 is None or lon2 is None: return 999999
+        R = 6371
+        dLat = math.radians(lat2 - lat1)
+        dLon = math.radians(lon2 - lon1)
+        a = math.sin(dLat/2) * math.sin(dLat/2) + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dLon/2) * math.sin(dLon/2)
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+        return R * c
+
+    assigned_delivery_id = None
+    user_lat = deliveryDetails.get("lat")
+    user_lng = deliveryDetails.get("lng")
+
+    if user_lat is not None and user_lng is not None:
+        cursor.execute("SELECT * FROM hubs WHERE is_active = 1")
+        active_hubs = cursor.fetchall()
+        nearest_hub_id = None
+        min_dist = float('inf')
+        for h in active_hubs:
+            dist = haversine(user_lat, user_lng, h["lat"], h["lng"])
+            if dist <= h["radius_km"] and dist < min_dist:
+                min_dist = dist
+                nearest_hub_id = h["id"]
+        
+        if nearest_hub_id is not None:
+            # Find delivery personnel in the nearest hub only, ordered by number of active orders
+            query = f'''
+                SELECT dp.id, COUNT(o.id) as active_orders 
+                FROM delivery_personnel dp
+                LEFT JOIN orders o ON dp.id = o.delivery_partner_id AND o.status NOT IN ('Delivered', 'Cancelled')
+                WHERE dp.hub_id = {nearest_hub_id} AND dp.is_active = 1
+                GROUP BY dp.id
+                ORDER BY active_orders ASC, dp.id ASC
+                LIMIT 1
+            '''
+            cursor.execute(query)
+            dp_row = cursor.fetchone()
+            if dp_row:
+                assigned_delivery_id = dp_row["id"]
+
     cursor.execute(
-        "INSERT INTO orders (id, date, items, grandTotal, deliveryDetails, userEmail, userPhone, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (order_id, date, json.dumps(items), grandTotal, json.dumps(deliveryDetails), userEmail, userPhone, status)
+        "INSERT INTO orders (id, date, items, grandTotal, deliveryDetails, userEmail, userPhone, status, delivery_partner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (order_id, date, json.dumps(items), grandTotal, json.dumps(deliveryDetails), userEmail, userPhone, status, assigned_delivery_id)
     )
     
     # Save the order notification to the admin alerts database
@@ -222,7 +291,12 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
 @app.get("/api/orders")
 def get_orders(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
-    cursor.execute("SELECT * FROM orders ORDER BY date DESC")
+    cursor.execute('''
+        SELECT o.*, dp.name as dp_name, dp.phone as dp_phone 
+        FROM orders o 
+        LEFT JOIN delivery_personnel dp ON o.delivery_partner_id = dp.id 
+        ORDER BY o.date DESC
+    ''')
     orders = cursor.fetchall()
     for o in orders:
         o["items"] = json.loads(o["items"]) if o["items"] else []
@@ -232,7 +306,13 @@ def get_orders(db: sqlite3.Connection = Depends(get_db)):
 @app.get("/api/orders/user/{phone}")
 def get_user_orders(phone: str, db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
-    cursor.execute("SELECT * FROM orders WHERE userPhone = ? ORDER BY date DESC", (phone,))
+    cursor.execute('''
+        SELECT o.*, dp.name as dp_name, dp.phone as dp_phone 
+        FROM orders o 
+        LEFT JOIN delivery_personnel dp ON o.delivery_partner_id = dp.id 
+        WHERE o.userPhone = ? 
+        ORDER BY o.date DESC
+    ''', (phone,))
     orders = cursor.fetchall()
     for o in orders:
         o["items"] = json.loads(o["items"]) if o["items"] else []
@@ -987,3 +1067,104 @@ def get_home_feed(db: sqlite3.Connection = Depends(get_db)):
         "hubs": hubs,
         "notifications": notifications
     }
+
+
+# --- DELIVERY API ---
+
+@app.post("/api/delivery/login")
+async def delivery_login(request: Request, db: sqlite3.Connection = Depends(get_db)):
+    data = await request.json()
+    email = data.get("email")
+    name = data.get("name")
+    phone = data.get("phone")
+    picture = data.get("picture")
+    hub_id = data.get("hub_id")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    cursor = db.cursor()
+    cursor.execute("SELECT * FROM delivery_personnel WHERE email = ?", (email,))
+    existing = cursor.fetchone()
+
+    if existing:
+        if phone:
+            cursor.execute("UPDATE delivery_personnel SET phone = ?, name = ?, picture = ? WHERE email = ?", (phone, name, picture, email))
+            db.commit()
+            cursor.execute("SELECT * FROM delivery_personnel WHERE email = ?", (email,))
+            existing = cursor.fetchone()
+        return get_dp_with_true_rating(cursor, existing['id'])
+    else:
+        if not phone or not hub_id:
+            raise HTTPException(status_code=400, detail="Phone and Hub ID are required for first time login")
+        cursor.execute('''INSERT INTO delivery_personnel (email, name, phone, picture, hub_id) VALUES (?, ?, ?, ?, ?)''',
+                       (email, name, phone, picture, hub_id))
+        db.commit()
+        new_id = cursor.lastrowid
+        return get_dp_with_true_rating(cursor, new_id)
+
+@app.get("/api/delivery/orders/{email}")
+def get_delivery_orders(email: str, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT id FROM delivery_personnel WHERE email = ?", (email,))
+    dp = cursor.fetchone()
+    if not dp:
+        raise HTTPException(status_code=404, detail="Delivery personnel not found")
+    
+    cursor.execute("SELECT * FROM orders WHERE delivery_partner_id = ? ORDER BY date DESC", (dp["id"],))
+    orders = cursor.fetchall()
+    for o in orders:
+        o["items"] = json.loads(o["items"]) if o["items"] else []
+        o["deliveryDetails"] = json.loads(o["deliveryDetails"]) if o["deliveryDetails"] else {}
+    return orders
+
+@app.patch("/api/orders/{order_id}/rate-delivery")
+async def rate_delivery(order_id: str, request: Request, db: sqlite3.Connection = Depends(get_db)):
+    data = await request.json()
+    rating = data.get("rating")
+    
+    if not rating:
+        raise HTTPException(status_code=400, detail="Rating is required")
+        
+    cursor = db.cursor()
+    cursor.execute("UPDATE orders SET delivery_partner_rating = ? WHERE id = ?", (rating, order_id))
+    
+    cursor.execute("SELECT delivery_partner_id FROM orders WHERE id = ?", (order_id,))
+    order = cursor.fetchone()
+    if order and order["delivery_partner_id"]:
+        dp_id = order["delivery_partner_id"]
+        cursor.execute("SELECT rating, total_ratings FROM delivery_personnel WHERE id = ?", (dp_id,))
+        dp = cursor.fetchone()
+        if dp:
+            new_total = dp["total_ratings"] + 1
+            new_rating = ((dp["rating"] * dp["total_ratings"]) + rating) / new_total
+            cursor.execute("UPDATE delivery_personnel SET rating = ?, total_ratings = ? WHERE id = ?", (new_rating, new_total, dp_id))
+            
+    db.commit()
+    return {"message": "Delivery rated successfully"}
+
+@app.get("/api/delivery-personnel/{dp_id}")
+def get_delivery_personnel(dp_id: int, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    dp = get_dp_with_true_rating(cursor, dp_id)
+    if not dp:
+        raise HTTPException(status_code=404, detail="Delivery personnel not found")
+    return dp
+
+@app.put("/api/delivery-personnel/{dp_id}")
+async def update_delivery_personnel(dp_id: int, request: Request, db: sqlite3.Connection = Depends(get_db)):
+    data = await request.json()
+    name = data.get("name")
+    phone = data.get("phone")
+    
+    if not name or not phone:
+        raise HTTPException(status_code=400, detail="Name and phone are required")
+        
+    cursor = db.cursor()
+    cursor.execute("UPDATE delivery_personnel SET name = ?, phone = ? WHERE id = ?", (name, phone, dp_id))
+    db.commit()
+    
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Delivery personnel not found")
+        
+    return get_dp_with_true_rating(cursor, dp_id)

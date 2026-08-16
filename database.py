@@ -135,6 +135,20 @@ def init_db():
       is_active BOOLEAN DEFAULT 1
     )''')
 
+    # Delivery Personnel Table
+    c.execute('''CREATE TABLE IF NOT EXISTS delivery_personnel (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      phone TEXT,
+      picture TEXT,
+      hub_id INTEGER,
+      rating REAL DEFAULT 0,
+      total_ratings INTEGER DEFAULT 0,
+      is_active BOOLEAN DEFAULT 1,
+      FOREIGN KEY (hub_id) REFERENCES hubs(id)
+    )''')
+
     # Announcements Table
     c.execute('''CREATE TABLE IF NOT EXISTS announcements (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -359,6 +373,16 @@ def init_db():
     
     try:
         c.execute("ALTER TABLE deals_of_the_day ADD COLUMN in_stock BOOLEAN DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN delivery_partner_id INTEGER REFERENCES delivery_personnel(id)")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+        
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN delivery_partner_rating INTEGER")
     except sqlite3.OperationalError:
         pass # Column already exists
 
