@@ -57,6 +57,8 @@ def init_db():
       rating INTEGER,
       review TEXT,
       eta TEXT,
+      delivery_pin TEXT,
+      delivery_partner_review TEXT,
       FOREIGN KEY (userEmail) REFERENCES customers (email)
     )''')
 
@@ -383,6 +385,16 @@ def init_db():
         
     try:
         c.execute("ALTER TABLE orders ADD COLUMN delivery_partner_rating INTEGER")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN delivery_pin TEXT")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN delivery_partner_review TEXT")
     except sqlite3.OperationalError:
         pass # Column already exists
 

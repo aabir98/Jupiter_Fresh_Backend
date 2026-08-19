@@ -205,9 +205,12 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
             if dp_row:
                 assigned_delivery_id = dp_row["id"]
 
+    import random
+    delivery_pin = f"{random.randint(1000, 9999)}"
+
     cursor.execute(
-        "INSERT INTO orders (id, date, items, grandTotal, deliveryDetails, userEmail, userPhone, status, delivery_partner_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (order_id, date, json.dumps(items), grandTotal, json.dumps(deliveryDetails), userEmail, userPhone, status, assigned_delivery_id)
+        "INSERT INTO orders (id, date, items, grandTotal, deliveryDetails, userEmail, userPhone, status, delivery_partner_id, delivery_pin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (order_id, date, json.dumps(items), grandTotal, json.dumps(deliveryDetails), userEmail, userPhone, status, assigned_delivery_id, delivery_pin)
     )
     
     # Save the order notification to the admin alerts database
@@ -286,7 +289,7 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
     except Exception as e:
         print(f"Failed to send push notifications: {e}")
 
-    return {"message": "Order created successfully", "id": order_id}
+    return {"message": "Order created successfully", "id": order_id, "delivery_pin": delivery_pin}
 
 @app.get("/api/orders")
 def get_orders(db: sqlite3.Connection = Depends(get_db)):
@@ -324,12 +327,21 @@ async def update_order_status(order_id: str, request: Request, db: sqlite3.Conne
     data = await request.json()
     status = data.get("status")
     eta = data.get("eta")
+    pin = data.get("pin") or data.get("delivery_pin")
 
     cursor = db.cursor()
     
-    cursor.execute("SELECT userEmail FROM orders WHERE id = ?", (order_id,))
+    cursor.execute("SELECT userEmail, delivery_pin FROM orders WHERE id = ?", (order_id,))
     order_row = cursor.fetchone()
-    userEmail = order_row["userEmail"] if order_row else None
+    if not order_row:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    userEmail = order_row["userEmail"]
+    stored_pin = order_row.get("delivery_pin")
+
+    if status == "Delivered":
+        if stored_pin and (not pin or str(pin).strip() != str(stored_pin).strip()):
+            raise HTTPException(status_code=400, detail="Wrong PIN! The delivery PIN entered does not match. Please ask the customer for the correct 4-digit PIN.")
 
     if eta is not None:
         cursor.execute("UPDATE orders SET status = ?, eta = ? WHERE id = ?", (status, eta, order_id))
@@ -1122,12 +1134,13 @@ def get_delivery_orders(email: str, db: sqlite3.Connection = Depends(get_db)):
 async def rate_delivery(order_id: str, request: Request, db: sqlite3.Connection = Depends(get_db)):
     data = await request.json()
     rating = data.get("rating")
+    review = data.get("review")
     
     if not rating:
         raise HTTPException(status_code=400, detail="Rating is required")
         
     cursor = db.cursor()
-    cursor.execute("UPDATE orders SET delivery_partner_rating = ? WHERE id = ?", (rating, order_id))
+    cursor.execute("UPDATE orders SET delivery_partner_rating = ?, delivery_partner_review = ? WHERE id = ?", (rating, review, order_id))
     
     cursor.execute("SELECT delivery_partner_id FROM orders WHERE id = ?", (order_id,))
     order = cursor.fetchone()
@@ -1141,7 +1154,7 @@ async def rate_delivery(order_id: str, request: Request, db: sqlite3.Connection 
             cursor.execute("UPDATE delivery_personnel SET rating = ?, total_ratings = ? WHERE id = ?", (new_rating, new_total, dp_id))
             
     db.commit()
-    return {"message": "Delivery rated successfully"}
+    return {"message": "Delivery rated successfully", "id": order_id, "rating": rating, "review": review}
 
 @app.get("/api/delivery-personnel/{dp_id}")
 def get_delivery_personnel(dp_id: int, db: sqlite3.Connection = Depends(get_db)):
