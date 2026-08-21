@@ -190,14 +190,19 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
                 nearest_hub_id = h["id"]
         
         if nearest_hub_id is not None:
-            # Find delivery personnel in the nearest hub only, ordered by number of active orders
+            # Find an available delivery personnel (0 active orders) with lowest completed orders, then highest rating
             query = f'''
-                SELECT dp.id, COUNT(o.id) as active_orders 
-                FROM delivery_personnel dp
-                LEFT JOIN orders o ON dp.id = o.delivery_partner_id AND o.status NOT IN ('Delivered', 'Cancelled')
-                WHERE dp.hub_id = {nearest_hub_id} AND dp.is_active = 1
-                GROUP BY dp.id
-                ORDER BY active_orders ASC, dp.id ASC
+                WITH dp_stats AS (
+                    SELECT dp.id, dp.rating,
+                           (SELECT COUNT(*) FROM orders o1 WHERE o1.delivery_partner_id = dp.id AND o1.status NOT IN ('Delivered', 'Cancelled')) as active_orders,
+                           (SELECT COUNT(*) FROM orders o2 WHERE o2.delivery_partner_id = dp.id AND o2.status = 'Delivered') as completed_deliveries
+                    FROM delivery_personnel dp
+                    WHERE dp.hub_id = {nearest_hub_id} AND dp.is_active = 1
+                )
+                SELECT id
+                FROM dp_stats
+                WHERE active_orders = 0
+                ORDER BY completed_deliveries ASC, rating DESC, id ASC
                 LIMIT 1
             '''
             cursor.execute(query)
@@ -209,8 +214,8 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
     delivery_pin = f"{random.randint(1000, 9999)}"
 
     cursor.execute(
-        "INSERT INTO orders (id, date, items, grandTotal, deliveryDetails, userEmail, userPhone, status, delivery_partner_id, delivery_pin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (order_id, date, json.dumps(items), grandTotal, json.dumps(deliveryDetails), userEmail, userPhone, status, assigned_delivery_id, delivery_pin)
+        "INSERT INTO orders (id, date, items, grandTotal, deliveryDetails, userEmail, userPhone, status, delivery_partner_id, delivery_pin, hub_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (order_id, date, json.dumps(items), grandTotal, json.dumps(deliveryDetails), userEmail, userPhone, status, assigned_delivery_id, delivery_pin, nearest_hub_id)
     )
     
     # Save the order notification to the admin alerts database
@@ -295,9 +300,10 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
 def get_orders(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     cursor.execute('''
-        SELECT o.*, dp.name as dp_name, dp.phone as dp_phone 
+        SELECT o.*, dp.name as dp_name, dp.phone as dp_phone, h.name as hub_name
         FROM orders o 
         LEFT JOIN delivery_personnel dp ON o.delivery_partner_id = dp.id 
+        LEFT JOIN hubs h ON o.hub_id = h.id
         ORDER BY o.date DESC
     ''')
     orders = cursor.fetchall()
@@ -331,29 +337,57 @@ async def update_order_status(order_id: str, request: Request, db: sqlite3.Conne
 
     cursor = db.cursor()
     
-    cursor.execute("SELECT userEmail, delivery_pin FROM orders WHERE id = ?", (order_id,))
+    cursor.execute('''
+        SELECT o.userEmail, o.delivery_pin, dp.name as dp_name, o.hub_id, o.delivery_partner_id
+        FROM orders o 
+        LEFT JOIN delivery_personnel dp ON o.delivery_partner_id = dp.id 
+        WHERE o.id = ?
+    ''', (order_id,))
     order_row = cursor.fetchone()
     if not order_row:
         raise HTTPException(status_code=404, detail="Order not found")
 
     userEmail = order_row["userEmail"]
     stored_pin = order_row.get("delivery_pin")
+    dp_name = order_row.get("dp_name")
+    hub_id = order_row.get("hub_id")
+    dp_id = order_row.get("delivery_partner_id")
 
     if status == "Delivered":
         if stored_pin and (not pin or str(pin).strip() != str(stored_pin).strip()):
             raise HTTPException(status_code=400, detail="Wrong PIN! The delivery PIN entered does not match. Please ask the customer for the correct 4-digit PIN.")
 
-    if eta is not None:
-        cursor.execute("UPDATE orders SET status = ?, eta = ? WHERE id = ?", (status, eta, order_id))
+    import datetime
+    if status == "On the way":
+        picked_up_at = datetime.datetime.now().isoformat()
+        if eta is not None:
+            cursor.execute("UPDATE orders SET status = ?, eta = ?, picked_up_at = ? WHERE id = ?", (status, eta, picked_up_at, order_id))
+        else:
+            cursor.execute("UPDATE orders SET status = ?, picked_up_at = ? WHERE id = ?", (status, picked_up_at, order_id))
     else:
-        cursor.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
+        if eta is not None:
+            cursor.execute("UPDATE orders SET status = ?, eta = ? WHERE id = ?", (status, eta, order_id))
+        else:
+            cursor.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
         
-    if userEmail and status in ["Picked Up", "Delivered"]:
-        notif_text = f"Your order {order_id} is {status.lower()}"
+    if userEmail and status in ["Picked Up", "Delivered", "Arrived"]:
+        if status == "Arrived":
+            notif_text = f"Delivery man {dp_name or ''} with order {order_id} have arrived"
+        else:
+            notif_text = f"Your order {order_id} is {status.lower()}"
         cursor.execute("INSERT INTO user_notifications (userEmail, text) VALUES (?, ?)", (userEmail, notif_text))
         
     db.commit()
     
+    # Auto-assign queued orders
+    if status in ["Delivered", "Cancelled"] and dp_id and hub_id:
+        cursor.execute("SELECT COUNT(*) as active FROM orders WHERE delivery_partner_id = ? AND status NOT IN ('Delivered', 'Cancelled')", (dp_id,))
+        if cursor.fetchone()["active"] == 0:
+            cursor.execute("SELECT id FROM orders WHERE hub_id = ? AND delivery_partner_id IS NULL AND status NOT IN ('Delivered', 'Cancelled') ORDER BY date ASC LIMIT 1", (hub_id,))
+            next_order = cursor.fetchone()
+            if next_order:
+                cursor.execute("UPDATE orders SET delivery_partner_id = ? WHERE id = ?", (dp_id, next_order["id"]))
+                db.commit()
     if cursor.rowcount == 0:
         raise HTTPException(status_code=404, detail="Order not found")
     
@@ -1181,3 +1215,103 @@ async def update_delivery_personnel(dp_id: int, request: Request, db: sqlite3.Co
         raise HTTPException(status_code=404, detail="Delivery personnel not found")
         
     return get_dp_with_true_rating(cursor, dp_id)
+
+@app.get("/api/delivery-personnel/hub/{hub_id}")
+def get_delivery_personnel_by_hub(hub_id: int, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT id FROM delivery_personnel WHERE hub_id = ? AND is_active = 1", (hub_id,))
+    dp_ids = [row["id"] for row in cursor.fetchall()]
+    dps = []
+    for dp_id in dp_ids:
+        dp = get_dp_with_true_rating(cursor, dp_id)
+        if dp:
+            dps.append(dp)
+    return dps
+
+@app.patch("/api/orders/{order_id}/assign")
+async def assign_order_manually(order_id: str, request: Request, db: sqlite3.Connection = Depends(get_db)):
+    data = await request.json()
+    dp_id = data.get("delivery_partner_id")
+    if not dp_id:
+        raise HTTPException(status_code=400, detail="delivery_partner_id is required")
+        
+    cursor = db.cursor()
+    # verify dp exists
+    cursor.execute("SELECT id FROM delivery_personnel WHERE id = ?", (dp_id,))
+    if not cursor.fetchone():
+        raise HTTPException(status_code=404, detail="Delivery personnel not found")
+        
+    cursor.execute("UPDATE orders SET delivery_partner_id = ? WHERE id = ?", (dp_id, order_id))
+    db.commit()
+    
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Order not found")
+        
+    return {"message": "Order assigned successfully"}
+
+@app.get("/api/admin/delivery-partners/performance")
+def get_delivery_partners_performance(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    hub_id: Optional[int] = None,
+    db: sqlite3.Connection = Depends(get_db)
+):
+    cursor = db.cursor()
+    
+    # Base query for delivery personnel
+    query = "SELECT dp.*, h.name as hub_name FROM delivery_personnel dp LEFT JOIN hubs h ON dp.hub_id = h.id"
+    params = []
+    if hub_id:
+        query += " WHERE dp.hub_id = ?"
+        params.append(hub_id)
+        
+    cursor.execute(query, tuple(params))
+    dps = [dict(row) for row in cursor.fetchall()]
+    
+    for dp in dps:
+        dp_id = dp["id"]
+        
+        # Get active orders
+        cursor.execute("SELECT id, status, date FROM orders WHERE delivery_partner_id = ? AND status NOT IN ('Delivered', 'Cancelled')", (dp_id,))
+        dp["active_orders"] = [dict(row) for row in cursor.fetchall()]
+        dp["status"] = "Busy" if len(dp["active_orders"]) > 0 else "Free"
+        
+        # Get delivered orders
+        del_query = "SELECT id, status, date, grandTotal, delivery_partner_rating, delivery_partner_review FROM orders WHERE delivery_partner_id = ? AND status = 'Delivered'"
+        cursor.execute(del_query, (dp_id,))
+        all_del_orders = [dict(row) for row in cursor.fetchall()]
+        
+        filtered_del_orders = []
+        if start_date or end_date:
+            from datetime import datetime
+            
+            try:
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d") if start_date else None
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d") if end_date else None
+                if end_dt:
+                    end_dt = end_dt.replace(hour=23, minute=59, second=59)
+            except Exception:
+                start_dt = None
+                end_dt = None
+                
+            for order in all_del_orders:
+                # Format is like "21 Aug 2026, 06:16 am" or "14 Aug 2026 at 06:11 AM"
+                date_str = order['date'].replace(" at ", ", ")
+                try:
+                    order_dt = datetime.strptime(date_str, "%d %b %Y, %I:%M %p")
+                    if start_dt and order_dt < start_dt:
+                        continue
+                    if end_dt and order_dt > end_dt:
+                        continue
+                    filtered_del_orders.append(order)
+                except Exception:
+                    # If we can't parse it, just append it so we don't lose data
+                    filtered_del_orders.append(order)
+            dp["delivered_orders"] = filtered_del_orders
+        else:
+            dp["delivered_orders"] = all_del_orders
+            
+        dp["delivered_orders"].sort(key=lambda x: x['date'], reverse=True)
+        dp["delivered_count"] = len(dp["delivered_orders"])
+        
+    return dps

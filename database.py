@@ -59,7 +59,10 @@ def init_db():
       eta TEXT,
       delivery_pin TEXT,
       delivery_partner_review TEXT,
-      FOREIGN KEY (userEmail) REFERENCES customers (email)
+      hub_id INTEGER,
+      picked_up_at TEXT,
+      FOREIGN KEY (userEmail) REFERENCES customers (email),
+      FOREIGN KEY (hub_id) REFERENCES hubs(id)
     )''')
 
     # Main Categories Table
@@ -184,6 +187,15 @@ def init_db():
       text TEXT NOT NULL,
       is_active BOOLEAN DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )''')
+    
+    # User Notifications Table
+    c.execute('''CREATE TABLE IF NOT EXISTS user_notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userEmail TEXT NOT NULL,
+      text TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (userEmail) REFERENCES customers (email) ON DELETE CASCADE
     )''')
 
     # Admin Subscriptions Table
@@ -395,6 +407,16 @@ def init_db():
 
     try:
         c.execute("ALTER TABLE orders ADD COLUMN delivery_partner_review TEXT")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN hub_id INTEGER REFERENCES hubs(id)")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN picked_up_at TEXT")
     except sqlite3.OperationalError:
         pass # Column already exists
 
