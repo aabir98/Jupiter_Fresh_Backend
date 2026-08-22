@@ -1,7 +1,7 @@
 import sqlite3
 
 def migrate():
-    conn = sqlite3.connect('taja_cart.db')
+    conn = sqlite3.connect('jupiter_fresh.db')
     c = conn.cursor()
     
     # User Notifications Table

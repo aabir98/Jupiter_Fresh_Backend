@@ -2,7 +2,7 @@ import sqlite3
 import json
 import os
 
-DB_NAME = os.environ.get("DATABASE_PATH", "taja_cart.db")
+DB_NAME = os.environ.get("DATABASE_PATH", "jupiter_fresh.db")
 
 def dict_factory(cursor, row):
     d = {}

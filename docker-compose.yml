@@ -6,7 +6,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - DATABASE_PATH=/data/taja_cart.db
+      - DATABASE_PATH=/data/jupiter_fresh.db
       - UPLOAD_DIR=/data/uploads
     volumes:
       - ./data:/data

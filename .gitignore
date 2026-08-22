@@ -1,7 +1,7 @@
 node_modules/
 uploads/
 *.db
-!taja_cart.db
+!jupiter_fresh.db
 .env
 venv/
 __pycache__/
