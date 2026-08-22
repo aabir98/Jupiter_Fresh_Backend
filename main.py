@@ -378,7 +378,7 @@ async def update_order_status(order_id: str, request: Request, db: sqlite3.Conne
 
     if status == "Delivered":
         if stored_pin and (not pin or str(pin).strip() != str(stored_pin).strip()):
-            raise HTTPException(status_code=400, detail="Wrong PIN! The delivery PIN entered does not match. Please ask the customer for the correct 4-digit PIN.")
+            raise HTTPException(status_code=400, detail="Wrong Delivery Pin. Ask Delivery Pin from customer")
 
     import datetime
     if status == "On the way":
@@ -477,6 +477,26 @@ async def save_address(request: Request, db: sqlite3.Connection = Depends(get_db
                    (userEmail, label, address, landmark, lat, lng))
     db.commit()
     return Response(content=json.dumps({"message": "Address saved successfully", "id": cursor.lastrowid}), status_code=201, media_type="application/json")
+
+@app.put("/api/addresses/{address_id}")
+async def update_address(address_id: int, request: Request, db: sqlite3.Connection = Depends(get_db)):
+    data = await request.json()
+    label = data.get("label")
+    address = data.get("address")
+    landmark = data.get("landmark")
+    lat = data.get("lat")
+    lng = data.get("lng")
+
+    if not label or not address or lat is None or lng is None:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    cursor = db.cursor()
+    cursor.execute("UPDATE saved_addresses SET label = ?, address = ?, landmark = ?, lat = ?, lng = ? WHERE id = ?",
+                   (label, address, landmark, lat, lng, address_id))
+    db.commit()
+    if cursor.rowcount == 0:
+        raise HTTPException(status_code=404, detail="Address not found")
+    return {"message": "Address updated successfully"}
 
 @app.delete("/api/addresses/{address_id}")
 def delete_address(address_id: int, db: sqlite3.Connection = Depends(get_db)):
@@ -1351,13 +1371,14 @@ def get_delivery_partners_performance(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     hub_id: Optional[int] = None,
+    is_deleted: Optional[int] = 0,
     db: sqlite3.Connection = Depends(get_db)
 ):
     cursor = db.cursor()
     
     # Base query for delivery personnel
-    query = "SELECT dp.*, h.name as hub_name FROM delivery_personnel dp LEFT JOIN hubs h ON dp.hub_id = h.id WHERE dp.is_deleted = 0"
-    params = []
+    query = "SELECT dp.*, h.name as hub_name FROM delivery_personnel dp LEFT JOIN hubs h ON dp.hub_id = h.id WHERE dp.is_deleted = ?"
+    params = [1 if is_deleted == 1 else 0]
     if hub_id:
         query += " AND dp.hub_id = ?"
         params.append(hub_id)
