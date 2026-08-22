@@ -197,7 +197,7 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
                            (SELECT COUNT(*) FROM orders o1 WHERE o1.delivery_partner_id = dp.id AND o1.status NOT IN ('Delivered', 'Cancelled')) as active_orders,
                            (SELECT COUNT(*) FROM orders o2 WHERE o2.delivery_partner_id = dp.id AND o2.status = 'Delivered') as completed_deliveries
                     FROM delivery_personnel dp
-                    WHERE dp.hub_id = {nearest_hub_id} AND dp.is_active = 1
+                    WHERE dp.hub_id = {nearest_hub_id} AND dp.is_active = 1 AND dp.is_disabled = 0 AND dp.is_deleted = 0
                 )
                 SELECT id
                 FROM dp_stats
@@ -234,6 +234,29 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
         cursor.execute("INSERT INTO user_notifications (userEmail, text) VALUES (?, ?)", (userEmail, user_notif_text))
         
     db.commit()
+
+    # Trigger Push Notification to Delivery Partner (if auto-assigned)
+    if assigned_delivery_id:
+        try:
+            import firebase_admin
+            from firebase_admin import messaging
+            cursor.execute("SELECT email FROM delivery_personnel WHERE id=?", (assigned_delivery_id,))
+            dp_row = cursor.fetchone()
+            if dp_row:
+                dp_email = dp_row['email']
+                cursor.execute("SELECT token FROM device_tokens WHERE identifier=? AND role='delivery'", (dp_email,))
+                dp_tokens = [r['token'] for r in cursor.fetchall()]
+                if dp_tokens and firebase_admin._apps:
+                    fcm_msg = messaging.MulticastMessage(
+                        notification=messaging.Notification(
+                            title="New Delivery Assigned! 📦",
+                            body="You have been assigned a new order. Please open the app to check."
+                        ),
+                        tokens=dp_tokens,
+                    )
+                    messaging.send_each_for_multicast(fcm_msg)
+        except Exception as e:
+            print(f"Failed to send FCM push to delivery partner: {e}")
 
     # Trigger Push Notification to Admins
     try:
@@ -783,14 +806,15 @@ async def register_device_token(request: Request, db: sqlite3.Connection = Depen
     data = await request.json()
     token = data.get("token")
     role = data.get("role", "customer")
+    identifier = data.get("identifier")
     if not token:
         raise HTTPException(status_code=400, detail="Token is required")
     
     cursor = db.cursor()
     try:
         cursor.execute(
-            "INSERT INTO device_tokens (token, role) VALUES (?, ?) ON CONFLICT(token) DO UPDATE SET role=excluded.role",
-            (token, role)
+            "INSERT INTO device_tokens (token, role, identifier) VALUES (?, ?, ?) ON CONFLICT(token) DO UPDATE SET role=excluded.role, identifier=excluded.identifier",
+            (token, role, identifier)
         )
         db.commit()
         return {"success": True, "message": "Token registered"}
@@ -1134,6 +1158,9 @@ async def delivery_login(request: Request, db: sqlite3.Connection = Depends(get_
     existing = cursor.fetchone()
 
     if existing:
+        if existing.get("is_deleted") == 1:
+            raise HTTPException(status_code=403, detail="Your account has been permanently deleted.")
+            
         if phone:
             cursor.execute("UPDATE delivery_personnel SET phone = ?, name = ?, picture = ? WHERE email = ?", (phone, name, picture, email))
             db.commit()
@@ -1152,10 +1179,13 @@ async def delivery_login(request: Request, db: sqlite3.Connection = Depends(get_
 @app.get("/api/delivery/orders/{email}")
 def get_delivery_orders(email: str, db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
-    cursor.execute("SELECT id FROM delivery_personnel WHERE email = ?", (email,))
+    cursor.execute("SELECT id, is_disabled, is_deleted FROM delivery_personnel WHERE email = ?", (email,))
     dp = cursor.fetchone()
-    if not dp:
+    if not dp or dp.get("is_deleted") == 1:
         raise HTTPException(status_code=404, detail="Delivery personnel not found")
+        
+    if dp.get("is_disabled") == 1:
+        return []
     
     cursor.execute("SELECT * FROM orders WHERE delivery_partner_id = ? ORDER BY date DESC", (dp["id"],))
     orders = cursor.fetchall()
@@ -1241,13 +1271,80 @@ async def assign_order_manually(order_id: str, request: Request, db: sqlite3.Con
     if not cursor.fetchone():
         raise HTTPException(status_code=404, detail="Delivery personnel not found")
         
+    # get current assigned dp
+    cursor.execute("SELECT delivery_partner_id FROM orders WHERE id = ?", (order_id,))
+    order_row = cursor.fetchone()
+    if not order_row:
+        raise HTTPException(status_code=404, detail="Order not found")
+    
+    old_dp_id = order_row["delivery_partner_id"]
+        
     cursor.execute("UPDATE orders SET delivery_partner_id = ? WHERE id = ?", (dp_id, order_id))
     db.commit()
     
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="Order not found")
+    # Trigger Push Notification to Delivery Partner
+    try:
+        import firebase_admin
+        from firebase_admin import messaging
+        
+        # Notify new DP
+        cursor.execute("SELECT email FROM delivery_personnel WHERE id=?", (dp_id,))
+        dp_row = cursor.fetchone()
+        if dp_row:
+            dp_email = dp_row['email']
+            cursor.execute("SELECT token FROM device_tokens WHERE identifier=? AND role='delivery'", (dp_email,))
+            dp_tokens = [r['token'] for r in cursor.fetchall()]
+            if dp_tokens and firebase_admin._apps:
+                fcm_msg = messaging.MulticastMessage(
+                    notification=messaging.Notification(
+                        title="New Delivery Assigned! 📦",
+                        body="An admin manually assigned an order to you. Please open the app to check."
+                    ),
+                    tokens=dp_tokens,
+                )
+                messaging.send_each_for_multicast(fcm_msg)
+                
+        # Notify old DP if reassigned
+        if old_dp_id and old_dp_id != dp_id:
+            cursor.execute("SELECT email FROM delivery_personnel WHERE id=?", (old_dp_id,))
+            old_dp_row = cursor.fetchone()
+            if old_dp_row:
+                old_dp_email = old_dp_row['email']
+                cursor.execute("SELECT token FROM device_tokens WHERE identifier=? AND role='delivery'", (old_dp_email,))
+                old_dp_tokens = [r['token'] for r in cursor.fetchall()]
+                if old_dp_tokens and firebase_admin._apps:
+                    fcm_msg_old = messaging.MulticastMessage(
+                        notification=messaging.Notification(
+                            title="Order Re-assigned 🔄",
+                            body=f"Order #{order_id} has been re-assigned to another delivery partner."
+                        ),
+                        tokens=old_dp_tokens,
+                    )
+                    messaging.send_each_for_multicast(fcm_msg_old)
+    except Exception as e:
+        print(f"Failed to send FCM push to delivery partner: {e}")
         
     return {"message": "Order assigned successfully"}
+
+@app.patch("/api/admin/delivery-personnel/{id}/toggle-status")
+def toggle_dp_status(id: int, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT is_disabled FROM delivery_personnel WHERE id = ?", (id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Delivery personnel not found")
+    
+    new_status = 0 if row["is_disabled"] else 1
+    cursor.execute("UPDATE delivery_personnel SET is_disabled = ? WHERE id = ?", (new_status, id))
+    db.commit()
+    return {"message": "Status updated", "is_disabled": new_status}
+
+@app.delete("/api/admin/delivery-personnel/{id}")
+def delete_dp(id: int, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("UPDATE delivery_personnel SET is_deleted = 1, is_disabled = 1 WHERE id = ?", (id,))
+    db.commit()
+    return {"message": "Delivery personnel permanently deleted"}
 
 @app.get("/api/admin/delivery-partners/performance")
 def get_delivery_partners_performance(
@@ -1259,10 +1356,10 @@ def get_delivery_partners_performance(
     cursor = db.cursor()
     
     # Base query for delivery personnel
-    query = "SELECT dp.*, h.name as hub_name FROM delivery_personnel dp LEFT JOIN hubs h ON dp.hub_id = h.id"
+    query = "SELECT dp.*, h.name as hub_name FROM delivery_personnel dp LEFT JOIN hubs h ON dp.hub_id = h.id WHERE dp.is_deleted = 0"
     params = []
     if hub_id:
-        query += " WHERE dp.hub_id = ?"
+        query += " AND dp.hub_id = ?"
         params.append(hub_id)
         
     cursor.execute(query, tuple(params))

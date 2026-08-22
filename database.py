@@ -151,8 +151,21 @@ def init_db():
       rating REAL DEFAULT 0,
       total_ratings INTEGER DEFAULT 0,
       is_active BOOLEAN DEFAULT 1,
+      is_disabled BOOLEAN DEFAULT 0,
+      is_deleted BOOLEAN DEFAULT 0,
       FOREIGN KEY (hub_id) REFERENCES hubs(id)
     )''')
+    
+    # Add new columns if they don't exist
+    try:
+        c.execute("ALTER TABLE delivery_personnel ADD COLUMN is_disabled BOOLEAN DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
+        
+    try:
+        c.execute("ALTER TABLE delivery_personnel ADD COLUMN is_deleted BOOLEAN DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
     # Announcements Table
     c.execute('''CREATE TABLE IF NOT EXISTS announcements (
@@ -226,12 +239,19 @@ def init_db():
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       token TEXT UNIQUE NOT NULL,
       role TEXT DEFAULT 'customer',
+      identifier TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )''')
     
     # Add role column if it doesn't exist (for existing databases)
     try:
         c.execute("ALTER TABLE device_tokens ADD COLUMN role TEXT DEFAULT 'customer'")
+    except sqlite3.OperationalError:
+        pass # Column already exists
+        
+    # Add identifier column if it doesn't exist
+    try:
+        c.execute("ALTER TABLE device_tokens ADD COLUMN identifier TEXT")
     except sqlite3.OperationalError:
         pass # Column already exists
 
