@@ -193,16 +193,21 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
             # Find an available delivery personnel (0 active orders) with lowest completed orders, then highest rating
             query = f'''
                 WITH dp_stats AS (
-                    SELECT dp.id, dp.rating,
+                    SELECT dp.id,
                            (SELECT COUNT(*) FROM orders o1 WHERE o1.delivery_partner_id = dp.id AND o1.status NOT IN ('Delivered', 'Cancelled')) as active_orders,
-                           (SELECT COUNT(*) FROM orders o2 WHERE o2.delivery_partner_id = dp.id AND o2.status = 'Delivered') as completed_deliveries
+                           (SELECT COUNT(*) FROM orders o2 WHERE o2.delivery_partner_id = dp.id AND o2.status = 'Delivered') as completed_deliveries,
+                           COALESCE(
+                               (SELECT SUM(COALESCE(o3.delivery_partner_rating, 2.5)) * 1.0 / NULLIF(COUNT(o3.id), 0)
+                                FROM orders o3 WHERE o3.delivery_partner_id = dp.id AND o3.status = 'Delivered'),
+                               0.0
+                           ) as actual_rating
                     FROM delivery_personnel dp
                     WHERE dp.hub_id = {nearest_hub_id} AND dp.is_active = 1 AND dp.is_disabled = 0 AND dp.is_deleted = 0
                 )
                 SELECT id
                 FROM dp_stats
                 WHERE active_orders = 0
-                ORDER BY completed_deliveries ASC, rating DESC, id ASC
+                ORDER BY completed_deliveries ASC, actual_rating DESC, id ASC
                 LIMIT 1
             '''
             cursor.execute(query)
@@ -1230,12 +1235,9 @@ async def rate_delivery(order_id: str, request: Request, db: sqlite3.Connection 
     order = cursor.fetchone()
     if order and order["delivery_partner_id"]:
         dp_id = order["delivery_partner_id"]
-        cursor.execute("SELECT rating, total_ratings FROM delivery_personnel WHERE id = ?", (dp_id,))
-        dp = cursor.fetchone()
-        if dp:
-            new_total = dp["total_ratings"] + 1
-            new_rating = ((dp["rating"] * dp["total_ratings"]) + rating) / new_total
-            cursor.execute("UPDATE delivery_personnel SET rating = ?, total_ratings = ? WHERE id = ?", (new_rating, new_total, dp_id))
+        true_dp = get_dp_with_true_rating(cursor, dp_id)
+        if true_dp:
+            cursor.execute("UPDATE delivery_personnel SET rating = ?, total_ratings = ? WHERE id = ?", (true_dp['rating'], true_dp['total_ratings'], dp_id))
             
     db.commit()
     return {"message": "Delivery rated successfully", "id": order_id, "rating": rating, "review": review}
