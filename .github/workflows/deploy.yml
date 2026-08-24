@@ -1,27 +1,21 @@
-name: Deploy Backend to Lightsail
+name: Deploy Backend to AWS Lightsail
 
 on:
   push:
     branches:
-      - main  # Triggers the pipeline when you push to the main branch
+      - main
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy to Server via SSH
+      - name: Deploy to Lightsail via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USERNAME }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          host: ${{ secrets.LIGHTSAIL_HOST }}
+          username: ${{ secrets.LIGHTSAIL_USERNAME }}
+          key: ${{ secrets.LIGHTSAIL_SSH_KEY }}
           script: |
-            # Navigate to the project directory
-            # IMPORTANT: You may need to change this path depending on where your backend is on the server!
-            cd ~/Taja_cart_backend_fastapi_sqlite
-            
-            # Pull the latest changes from GitHub
+            cd /home/ubuntu/Jupiter_Fresh_Backend
             git pull origin main
-            
-            # Rebuild and restart the Docker container in the background
             sudo docker compose up -d --build
