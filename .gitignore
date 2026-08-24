@@ -1,7 +1,6 @@
 node_modules/
 uploads/
 *.db
-!jupiter_fresh.db
 .env
 venv/
 __pycache__/
