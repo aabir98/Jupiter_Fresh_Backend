@@ -41,6 +41,7 @@ def get_dp_with_true_rating(cursor, dp_id):
 app = FastAPI()
 
 # Initialize Firebase Admin SDK
+# Jupiter Fresh Backend API v1.0.1 - CI/CD Test
 try:
     # This will use the GOOGLE_APPLICATION_CREDENTIALS environment variable
     # Or default service account if running on GCP. 
