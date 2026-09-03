@@ -8,8 +8,11 @@ from fastapi.staticfiles import StaticFiles
 from database import get_db, init_db
 import sqlite3
 import shutil
+import hmac
+import hashlib
 import firebase_admin
 from firebase_admin import credentials, messaging
+import razorpay
 
 
 def get_dp_with_true_rating(cursor, dp_id):
@@ -149,11 +152,60 @@ def save_upload_file(upload_file: UploadFile) -> str:
         shutil.copyfileobj(upload_file.file, buffer)
     return f"/uploads/{filename}"
 
-# --- ORDERS API ---
+# --- RAZORPAY PAYMENT GATEWAY API ---
 
-@app.post("/api/orders")
-async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db)):
+RAZORPAY_KEY_ID = os.environ.get("RAZORPAY_KEY_ID", "rzp_test_5W9Z3kK4z5Xy")
+RAZORPAY_KEY_SECRET = os.environ.get("RAZORPAY_KEY_SECRET", "dummy_secret_key")
+
+try:
+    razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
+except Exception as e:
+    razorpay_client = None
+    print(f"Razorpay Client init notice: {e}")
+
+@app.get("/api/razorpay/key")
+def get_razorpay_key():
+    return {"key": RAZORPAY_KEY_ID}
+
+@app.post("/api/razorpay/create-order")
+async def create_razorpay_order(request: Request):
     data = await request.json()
+    amount = float(data.get("amount", 0))
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Invalid order amount")
+    
+    amount_in_paise = int(round(amount * 100))
+    currency = data.get("currency", "INR")
+    receipt = data.get("receipt", f"receipt_{int(time.time())}")
+
+    if razorpay_client:
+        try:
+            rzp_order = razorpay_client.order.create({
+                "amount": amount_in_paise,
+                "currency": currency,
+                "receipt": receipt,
+                "payment_capture": 1
+            })
+            return {
+                "id": rzp_order["id"],
+                "amount": rzp_order["amount"],
+                "currency": rzp_order["currency"],
+                "key": RAZORPAY_KEY_ID,
+                "isMock": False
+            }
+        except Exception as e:
+            print(f"Razorpay SDK order creation notice: {e}")
+
+    mock_order_id = f"order_{int(time.time())}_{os.urandom(4).hex()[:6]}"
+    return {
+        "id": mock_order_id,
+        "amount": amount_in_paise,
+        "currency": currency,
+        "key": RAZORPAY_KEY_ID,
+        "isMock": True
+    }
+
+async def save_order_internal(data: dict, db: sqlite3.Connection):
     order_id = data.get("id")
     date = data.get("date")
     items = data.get("items", [])
@@ -161,6 +213,10 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
     deliveryDetails = data.get("deliveryDetails", {})
     userEmail = deliveryDetails.get("email", "")
     userPhone = deliveryDetails.get("phone", "")
+    payment_method = data.get("paymentMethod") or data.get("payment_method") or "COD"
+    payment_status = data.get("paymentStatus") or data.get("payment_status") or ("Paid" if payment_method != "COD" else "Pending")
+    razorpay_order_id = data.get("razorpay_order_id")
+    razorpay_payment_id = data.get("razorpay_payment_id")
     status = "Placed"
 
     cursor = db.cursor()
@@ -178,11 +234,11 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
     assigned_delivery_id = None
     user_lat = deliveryDetails.get("lat")
     user_lng = deliveryDetails.get("lng")
+    nearest_hub_id = None
 
     if user_lat is not None and user_lng is not None:
         cursor.execute("SELECT * FROM hubs WHERE is_active = 1")
         active_hubs = cursor.fetchall()
-        nearest_hub_id = None
         min_dist = float('inf')
         for h in active_hubs:
             dist = haversine(user_lat, user_lng, h["lat"], h["lng"])
@@ -191,7 +247,6 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
                 nearest_hub_id = h["id"]
         
         if nearest_hub_id is not None:
-            # Find an available delivery personnel (0 active orders) with lowest completed orders, then highest rating
             query = f'''
                 WITH dp_stats AS (
                     SELECT dp.id,
@@ -220,8 +275,8 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
     delivery_pin = f"{random.randint(1000, 9999)}"
 
     cursor.execute(
-        "INSERT INTO orders (id, date, items, grandTotal, deliveryDetails, userEmail, userPhone, status, delivery_partner_id, delivery_pin, hub_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (order_id, date, json.dumps(items), grandTotal, json.dumps(deliveryDetails), userEmail, userPhone, status, assigned_delivery_id, delivery_pin, nearest_hub_id)
+        "INSERT INTO orders (id, date, items, grandTotal, deliveryDetails, userEmail, userPhone, status, delivery_partner_id, delivery_pin, hub_id, payment_method, payment_status, razorpay_order_id, razorpay_payment_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (order_id, date, json.dumps(items), grandTotal, json.dumps(deliveryDetails), userEmail, userPhone, status, assigned_delivery_id, delivery_pin, nearest_hub_id, payment_method, payment_status, razorpay_order_id, razorpay_payment_id)
     )
     
     # Save the order notification to the admin alerts database
@@ -230,7 +285,7 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
     if not customer_addr:
         customer_addr = "an unknown address"
         
-    alert_text = f"{customer_name} from {customer_addr} has placed an order of ₹{grandTotal}"
+    alert_text = f"{customer_name} from {customer_addr} has placed an order of ₹{grandTotal} ({payment_method})"
     cursor.execute("INSERT INTO admin_alerts (text) VALUES (?)", (alert_text,))
     
     # Save the user-specific order notification
@@ -324,6 +379,45 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
         print(f"Failed to send push notifications: {e}")
 
     return {"message": "Order created successfully", "id": order_id, "delivery_pin": delivery_pin}
+
+@app.post("/api/orders")
+async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db)):
+    data = await request.json()
+    return await save_order_internal(data, db)
+
+@app.post("/api/razorpay/verify-payment")
+async def verify_razorpay_payment(request: Request, db: sqlite3.Connection = Depends(get_db)):
+    data = await request.json()
+    razorpay_order_id = data.get("razorpay_order_id")
+    razorpay_payment_id = data.get("razorpay_payment_id")
+    razorpay_signature = data.get("razorpay_signature")
+    order_data = data.get("orderData", {})
+    payment_method = data.get("paymentMethod", "Online")
+
+    if not razorpay_order_id or not razorpay_payment_id:
+        raise HTTPException(status_code=400, detail="Missing payment identification parameters")
+
+    if razorpay_signature and RAZORPAY_KEY_SECRET != "dummy_secret_key":
+        try:
+            msg = f"{razorpay_order_id}|{razorpay_payment_id}"
+            generated_sig = hmac.new(
+                RAZORPAY_KEY_SECRET.encode('utf-8'),
+                msg.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            if generated_sig != razorpay_signature:
+                raise HTTPException(status_code=400, detail="Invalid Razorpay signature")
+        except HTTPException:
+            raise
+        except Exception as e:
+            print(f"Signature verification warning: {e}")
+
+    order_data["paymentMethod"] = payment_method
+    order_data["paymentStatus"] = "Paid"
+    order_data["razorpay_order_id"] = razorpay_order_id
+    order_data["razorpay_payment_id"] = razorpay_payment_id
+
+    return await save_order_internal(order_data, db)
 
 @app.get("/api/orders")
 def get_orders(db: sqlite3.Connection = Depends(get_db)):

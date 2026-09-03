@@ -61,6 +61,10 @@ def init_db():
       delivery_partner_review TEXT,
       hub_id INTEGER,
       picked_up_at TEXT,
+      payment_method TEXT DEFAULT 'COD',
+      payment_status TEXT DEFAULT 'Pending',
+      razorpay_order_id TEXT,
+      razorpay_payment_id TEXT,
       FOREIGN KEY (userEmail) REFERENCES customers (email),
       FOREIGN KEY (hub_id) REFERENCES hubs(id)
     )''')
@@ -439,6 +443,26 @@ def init_db():
         c.execute("ALTER TABLE orders ADD COLUMN picked_up_at TEXT")
     except sqlite3.OperationalError:
         pass # Column already exists
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN payment_method TEXT DEFAULT 'COD'")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN payment_status TEXT DEFAULT 'Pending'")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN razorpay_order_id TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        c.execute("ALTER TABLE orders ADD COLUMN razorpay_payment_id TEXT")
+    except sqlite3.OperationalError:
+        pass
 
     conn.commit()
     conn.close()
