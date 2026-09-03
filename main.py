@@ -313,7 +313,7 @@ async def create_order(request: Request, db: sqlite3.Connection = Depends(get_db
                             },
                             data=payload,
                             vapid_private_key=vapid_private_key,
-                            vapid_claims={"sub": "mailto:admin@tajacart.in"}
+                            vapid_claims={"sub": "mailto:admin@jupiterfresh.co.in"}
                         )
                     except WebPushException as ex:
                         if ex.response and ex.response.status_code in (404, 410):
