@@ -23,23 +23,33 @@ def get_dp_with_true_rating(cursor, dp_id):
     
     dp = dict(dp_row)
     
-    cursor.execute("SELECT delivery_partner_rating FROM orders WHERE delivery_partner_id = ? AND status = 'Delivered'", (dp_id,))
-    orders = cursor.fetchall()
-    
-    if not orders:
-        dp['rating'] = 0.0
-        dp['total_ratings'] = 0
-    else:
-        total = 0
-        for o in orders:
-            if o['delivery_partner_rating'] is not None:
-                total += o['delivery_partner_rating']
-            else:
-                total += 2.5
-        dp['rating'] = total / len(orders)
-        dp['total_ratings'] = len(orders)
+    try:
+        cursor.execute("SELECT delivery_partner_rating FROM orders WHERE delivery_partner_id = ? AND status = 'Delivered'", (dp_id,))
+        orders = cursor.fetchall()
+        
+        if not orders:
+            dp['rating'] = 0.0
+            dp['total_ratings'] = 0
+        else:
+            total = 0
+            count = 0
+            for o in orders:
+                r = o.get('delivery_partner_rating') if isinstance(o, dict) else o[0]
+                if r is not None:
+                    total += r
+                    count += 1
+                else:
+                    total += 2.5
+                    count += 1
+            dp['rating'] = total / count if count > 0 else 0.0
+            dp['total_ratings'] = count
+    except Exception as e:
+        print(f"Error calculating dp ratings for dp_id {dp_id}: {e}")
+        dp['rating'] = dp.get('rating', 0.0) or 0.0
+        dp['total_ratings'] = dp.get('total_ratings', 0) or 0
         
     return dp
+
 
 app = FastAPI()
 
@@ -1275,22 +1285,53 @@ def get_home_feed(db: sqlite3.Connection = Depends(get_db)):
 
 @app.post("/api/delivery/login")
 async def delivery_login(request: Request, db: sqlite3.Connection = Depends(get_db)):
-    data = await request.json()
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
     email = data.get("email")
-    name = data.get("name")
-    phone = data.get("phone")
-    picture = data.get("picture")
+    name = data.get("name", "")
+    phone = data.get("phone", "")
+    picture = data.get("picture", "")
     hub_id = data.get("hub_id")
 
     if not email:
         raise HTTPException(status_code=400, detail="Email is required")
 
     cursor = db.cursor()
+
+    # Ensure missing columns exist in delivery_personnel table safely
+    for col_def in [
+        "is_disabled BOOLEAN DEFAULT 0",
+        "is_deleted BOOLEAN DEFAULT 0",
+        "cash_to_collect REAL DEFAULT 0",
+        "cash_cleared BOOLEAN DEFAULT 0"
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE delivery_personnel ADD COLUMN {col_def}")
+            db.commit()
+        except Exception:
+            pass
+
+    # Ensure missing columns exist in orders table safely
+    for col_def in [
+        "delivery_partner_id INTEGER",
+        "delivery_partner_rating REAL",
+        "delivery_partner_review TEXT",
+        "cash_cleared BOOLEAN DEFAULT 0"
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE orders ADD COLUMN {col_def}")
+            db.commit()
+        except Exception:
+            pass
+
     cursor.execute("SELECT * FROM delivery_personnel WHERE email = ?", (email,))
     existing = cursor.fetchone()
 
     if existing:
-        if existing.get("is_deleted") == 1:
+        if existing.get("is_deleted", 0) == 1:
             raise HTTPException(status_code=403, detail="Your account has been permanently deleted.")
             
         if phone:
@@ -1302,6 +1343,7 @@ async def delivery_login(request: Request, db: sqlite3.Connection = Depends(get_
     else:
         if not phone or not hub_id:
             raise HTTPException(status_code=400, detail="Phone and Hub ID are required for first time login")
+            
         cursor.execute('''INSERT INTO delivery_personnel (email, name, phone, picture, hub_id) VALUES (?, ?, ?, ?, ?)''',
                        (email, name, phone, picture, hub_id))
         db.commit()
