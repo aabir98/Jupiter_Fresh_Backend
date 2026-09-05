@@ -1284,12 +1284,7 @@ def get_home_feed(db: sqlite3.Connection = Depends(get_db)):
 # --- DELIVERY API ---
 
 @app.post("/api/delivery/login")
-async def delivery_login(request: Request, db: sqlite3.Connection = Depends(get_db)):
-    try:
-        data = await request.json()
-    except Exception:
-        data = {}
-
+def delivery_login(data: dict, db: sqlite3.Connection = Depends(get_db)):
     email = data.get("email")
     name = data.get("name", "")
     phone = data.get("phone", "")
@@ -1349,6 +1344,7 @@ async def delivery_login(request: Request, db: sqlite3.Connection = Depends(get_
         db.commit()
         new_id = cursor.lastrowid
         return get_dp_with_true_rating(cursor, new_id)
+
 
 @app.get("/api/delivery/orders/{email}")
 def get_delivery_orders(email: str, db: sqlite3.Connection = Depends(get_db)):
