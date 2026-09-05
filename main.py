@@ -457,6 +457,7 @@ async def update_order_status(order_id: str, request: Request, db: sqlite3.Conne
     status = data.get("status")
     eta = data.get("eta")
     pin = data.get("pin") or data.get("delivery_pin")
+    payment_method = data.get("payment_method") or data.get("paymentMethod")
 
     cursor = db.cursor()
     
@@ -487,6 +488,17 @@ async def update_order_status(order_id: str, request: Request, db: sqlite3.Conne
             cursor.execute("UPDATE orders SET status = ?, eta = ?, picked_up_at = ? WHERE id = ?", (status, eta, picked_up_at, order_id))
         else:
             cursor.execute("UPDATE orders SET status = ?, picked_up_at = ? WHERE id = ?", (status, picked_up_at, order_id))
+    elif status == "Delivered":
+        if payment_method:
+            if eta is not None:
+                cursor.execute("UPDATE orders SET status = ?, eta = ?, payment_method = ?, payment_status = 'Paid' WHERE id = ?", (status, eta, payment_method, order_id))
+            else:
+                cursor.execute("UPDATE orders SET status = ?, payment_method = ?, payment_status = 'Paid' WHERE id = ?", (status, payment_method, order_id))
+        else:
+            if eta is not None:
+                cursor.execute("UPDATE orders SET status = ?, eta = ?, payment_status = 'Paid' WHERE id = ?", (status, eta, order_id))
+            else:
+                cursor.execute("UPDATE orders SET status = ?, payment_status = 'Paid' WHERE id = ?", (status, order_id))
     else:
         if eta is not None:
             cursor.execute("UPDATE orders SET status = ?, eta = ? WHERE id = ?", (status, eta, order_id))
@@ -1491,8 +1503,20 @@ def get_delivery_partners_performance(
         dp["active_orders"] = [dict(row) for row in cursor.fetchall()]
         dp["status"] = "Busy" if len(dp["active_orders"]) > 0 else "Free"
         
+        # Calculate cash to collect from pending COD orders
+        cursor.execute("""
+            SELECT SUM(grandTotal) as total_cash 
+            FROM orders 
+            WHERE delivery_partner_id = ? 
+              AND status = 'Delivered' 
+              AND (payment_method = 'COD' OR payment_method = 'Pay on Delivery') 
+              AND (cash_cleared IS NULL OR cash_cleared = 0)
+        """, (dp_id,))
+        cash_row = cursor.fetchone()
+        dp["cash_to_collect"] = float(cash_row["total_cash"]) if (cash_row and cash_row["total_cash"] is not None) else 0.0
+
         # Get delivered orders
-        del_query = "SELECT id, status, date, grandTotal, delivery_partner_rating, delivery_partner_review FROM orders WHERE delivery_partner_id = ? AND status = 'Delivered'"
+        del_query = "SELECT id, status, date, grandTotal, payment_method, payment_status, cash_cleared, delivery_partner_rating, delivery_partner_review FROM orders WHERE delivery_partner_id = ? AND status = 'Delivered'"
         cursor.execute(del_query, (dp_id,))
         all_del_orders = [dict(row) for row in cursor.fetchall()]
         
@@ -1530,3 +1554,90 @@ def get_delivery_partners_performance(
         dp["delivered_count"] = len(dp["delivered_orders"])
         
     return dps
+
+
+@app.post("/api/admin/delivery-personnel/{dp_id}/clear-payment")
+@app.patch("/api/admin/delivery-personnel/{dp_id}/clear-payment")
+def clear_delivery_partner_payment(dp_id: int, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT id, name FROM delivery_personnel WHERE id = ?", (dp_id,))
+    dp = cursor.fetchone()
+    if not dp:
+        raise HTTPException(status_code=404, detail="Delivery partner not found")
+        
+    cursor.execute("""
+        UPDATE orders 
+        SET cash_cleared = 1 
+        WHERE delivery_partner_id = ? 
+          AND status = 'Delivered' 
+          AND (payment_method = 'COD' OR payment_method = 'Pay on Delivery') 
+          AND (cash_cleared IS NULL OR cash_cleared = 0)
+    """, (dp_id,))
+    cleared_count = cursor.rowcount
+    db.commit()
+    
+    return {
+        "message": f"Successfully cleared cash payments for {dp['name']}",
+        "cleared_orders_count": cleared_count,
+        "cash_to_collect": 0.0
+    }
+
+
+@app.get("/api/delivery/wallet/{email}")
+def get_delivery_partner_wallet(email: str, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("SELECT id, name, email FROM delivery_personnel WHERE email = ?", (email,))
+    dp = cursor.fetchone()
+    if not dp:
+        raise HTTPException(status_code=404, detail="Delivery partner not found")
+        
+    dp_id = dp["id"]
+    
+    # Pending COD orders (cash to be submitted to admin)
+    cursor.execute("""
+        SELECT id, date, grandTotal, payment_method, payment_status, cash_cleared 
+        FROM orders 
+        WHERE delivery_partner_id = ? 
+          AND status = 'Delivered' 
+          AND (payment_method = 'COD' OR payment_method = 'Pay on Delivery') 
+          AND (cash_cleared IS NULL OR cash_cleared = 0)
+        ORDER BY date DESC
+    """, (dp_id,))
+    pending_orders = [dict(row) for row in cursor.fetchall()]
+    
+    cash_to_submit = sum(o["grandTotal"] for o in pending_orders)
+    
+    # Cleared COD orders history
+    cursor.execute("""
+        SELECT id, date, grandTotal, payment_method, payment_status, cash_cleared 
+        FROM orders 
+        WHERE delivery_partner_id = ? 
+          AND status = 'Delivered' 
+          AND (payment_method = 'COD' OR payment_method = 'Pay on Delivery') 
+          AND cash_cleared = 1
+        ORDER BY date DESC
+        LIMIT 50
+    """, (dp_id,))
+    cleared_orders = [dict(row) for row in cursor.fetchall()]
+    
+    # UPI / Online delivered orders history
+    cursor.execute("""
+        SELECT id, date, grandTotal, payment_method, payment_status 
+        FROM orders 
+        WHERE delivery_partner_id = ? 
+          AND status = 'Delivered' 
+          AND (payment_method NOT IN ('COD', 'Pay on Delivery') OR payment_method IS NULL)
+        ORDER BY date DESC
+        LIMIT 50
+    """, (dp_id,))
+    upi_orders = [dict(row) for row in cursor.fetchall()]
+    
+    return {
+        "dp_id": dp_id,
+        "dp_name": dp["name"],
+        "cash_to_submit": cash_to_submit,
+        "pending_orders": pending_orders,
+        "cleared_orders": cleared_orders,
+        "upi_orders": upi_orders
+    }
+
