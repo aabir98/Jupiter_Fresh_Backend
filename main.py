@@ -538,6 +538,13 @@ async def update_order_status(order_id: str, request: Request, db: sqlite3.Conne
     
     return {"message": "Order status updated successfully", "id": order_id, "status": status, "eta": eta}
 
+@app.delete("/api/admin/orders/all")
+def delete_all_orders(db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM orders")
+    db.commit()
+    return {"message": "All orders deleted successfully"}
+
 @app.delete("/api/orders/{order_id}")
 def delete_order(order_id: str, db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
@@ -663,6 +670,15 @@ def get_customers(db: sqlite3.Connection = Depends(get_db)):
                       FROM customers c LEFT JOIN orders o ON c.email = o.userEmail 
                       GROUP BY c.email ORDER BY c.joinedDate DESC''')
     return cursor.fetchall()
+
+@app.delete("/api/admin/customers/all")
+def delete_all_customers(db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM customers")
+    cursor.execute("DELETE FROM saved_addresses")
+    cursor.execute("DELETE FROM user_notifications")
+    db.commit()
+    return {"message": "All customers deleted successfully"}
 
 # --- OFFERS API ---
 
@@ -1512,6 +1528,13 @@ def delete_dp(id: int, db: sqlite3.Connection = Depends(get_db)):
     cursor.execute("UPDATE delivery_personnel SET is_deleted = 1, is_disabled = 1 WHERE id = ?", (id,))
     db.commit()
     return {"message": "Delivery personnel permanently deleted"}
+
+@app.delete("/api/admin/delivery-personnel/all")
+def delete_all_delivery_personnel(db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("DELETE FROM delivery_personnel")
+    db.commit()
+    return {"message": "All delivery personnel deleted successfully"}
 
 @app.get("/api/admin/delivery-partners/performance")
 def get_delivery_partners_performance(
