@@ -1522,19 +1522,19 @@ def toggle_dp_status(id: int, db: sqlite3.Connection = Depends(get_db)):
     db.commit()
     return {"message": "Status updated", "is_disabled": new_status}
 
-@app.delete("/api/admin/delivery-personnel/{id}")
-def delete_dp(id: int, db: sqlite3.Connection = Depends(get_db)):
-    cursor = db.cursor()
-    cursor.execute("UPDATE delivery_personnel SET is_deleted = 1, is_disabled = 1 WHERE id = ?", (id,))
-    db.commit()
-    return {"message": "Delivery personnel permanently deleted"}
-
 @app.delete("/api/admin/delivery-personnel/all")
 def delete_all_delivery_personnel(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     cursor.execute("DELETE FROM delivery_personnel")
     db.commit()
     return {"message": "All delivery personnel deleted successfully"}
+
+@app.delete("/api/admin/delivery-personnel/{id}")
+def delete_dp(id: int, db: sqlite3.Connection = Depends(get_db)):
+    cursor = db.cursor()
+    cursor.execute("UPDATE delivery_personnel SET is_deleted = 1, is_disabled = 1 WHERE id = ?", (id,))
+    db.commit()
+    return {"message": "Delivery personnel permanently deleted"}
 
 @app.get("/api/admin/delivery-partners/performance")
 def get_delivery_partners_performance(
