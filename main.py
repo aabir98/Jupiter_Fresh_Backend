@@ -1021,7 +1021,10 @@ async def update_main_category(main_category_id: int, name: str = Form(...), ima
     else:
         cursor.execute("UPDATE main_categories SET name = ? WHERE id = ?", (name, main_category_id))
         db.commit()
-        return {"id": main_category_id, "name": name}
+        cursor.execute("SELECT image FROM main_categories WHERE id = ?", (main_category_id,))
+        row = cursor.fetchone()
+        existing_img = row["image"] if row else ""
+        return {"id": main_category_id, "name": name, "image": existing_img}
 
 @app.delete("/api/main-categories/{main_category_id}")
 def delete_main_category(main_category_id: int, db: sqlite3.Connection = Depends(get_db)):
@@ -1058,7 +1061,10 @@ async def update_category(category_id: int, main_category_id: int = Form(...), p
     else:
         cursor.execute("UPDATE categories SET main_category_id = ?, parent_category_id = ?, name = ? WHERE id = ?", (main_category_id, parent_category_id, name, category_id))
         db.commit()
-        return {"id": category_id, "main_category_id": main_category_id, "parent_category_id": parent_category_id, "name": name}
+        cursor.execute("SELECT image FROM categories WHERE id = ?", (category_id,))
+        row = cursor.fetchone()
+        existing_img = row["image"] if row else ""
+        return {"id": category_id, "main_category_id": main_category_id, "parent_category_id": parent_category_id, "name": name, "image": existing_img}
 
 @app.delete("/api/categories/{category_id}")
 def delete_category(category_id: int, db: sqlite3.Connection = Depends(get_db)):
